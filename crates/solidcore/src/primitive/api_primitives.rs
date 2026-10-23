@@ -921,7 +921,7 @@ mod tests {
             ),
             (
                 create_partial_torus(k, o(), 10.0, 2.0, 0.0, 90.0),
-                "query.face_p1",
+                "surface.trim_srf_cache",
             ),
         ] {
             assert_eq!(deferred_at(&r), Some(unit));

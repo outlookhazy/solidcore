@@ -1643,16 +1643,7 @@ mod tests {
         let b = store.insert_brep(c, raw).unwrap();
         let axis = Curve::from(Line::from_points(Vec3::ZERO, Vec3::X, 3));
         let result = store.axis_inside_face((b, face), &axis);
-        assert!(
-            matches!(
-                result,
-                Err(SolidError::Unported {
-                    upstream: "SmFace::Point3DClassify",
-                    unit: "query.face_p1",
-                })
-            ),
-            "{result:?}"
-        );
+        assert_eq!(result, Ok(false));
     }
 
     #[test]
