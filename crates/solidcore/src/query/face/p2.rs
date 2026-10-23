@@ -1035,6 +1035,21 @@ impl<O: ClassObject, G: ClassGeometry<O>> ClassGeometry<O> for WithMadeTrimCurve
     fn vertex_face_gap(&self, vertex: O, surface: &Surface, face: Option<O>) -> Option<f64> {
         self.inner.vertex_face_gap(vertex, surface, face)
     }
+    fn topology_entity(&self, object: O) -> Option<(&Brep, EntityRef)> {
+        self.inner.topology_entity(object)
+    }
+    fn topology_handle(&self, entity: EntityRef) -> Option<O> {
+        self.inner.topology_handle(entity)
+    }
+    fn topology_handle_in(&self, brep: &Brep, entity: EntityRef) -> Option<O> {
+        self.inner.topology_handle_in(brep, entity)
+    }
+    fn topology_intersector_mate(&self, ti: O, entity: O) -> Option<Option<O>> {
+        self.inner.topology_intersector_mate(ti, entity)
+    }
+    fn brep_id(&self, brep: &Brep) -> Option<crate::topology::BrepId> {
+        self.inner.brep_id(brep)
+    }
     fn owner_of(
         &self,
         owner: crate::geom::object::ObjectRef,
