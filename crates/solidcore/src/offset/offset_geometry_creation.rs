@@ -2531,17 +2531,53 @@ impl OffsetGeometryCreation {
                 .ok_or(dangling("edge use without edge"))?;
             let off_tol = brep.edge_tolerance(off_edge)?;
 
-            // Drop Lifted Curve onto other extended surface to make 2nd UVTrimCurve
-            let dropped = surface_of(brep, other_ext_h)?.drop_and_trim_curve::<O>(
-                k,
-                &other_ext_domain,
-                &lifted_curve,
-                &lifted_curve.natural_interval(),
-                off_tol / 3.0,
-                true,
-                true,
-                None,
-            )?;
+            let other_s = surface_of(brep, other_ext_h)?.clone_for_evaluation()?;
+            let is_iso_discrepancy = if uv_curve_extended.degree()? == 1
+                && uv_curve_extended.number_control_points()? == 2
+            {
+                let ends = uv_curve_extended.ends()?;
+                let x_tol = EFF_ZERO * (1.0 + ext_domain.size().x);
+                let y_tol = EFF_ZERO * (1.0 + ext_domain.size().y);
+                let is_u = (ends.start.x - ends.end.x).abs() < x_tol;
+                let is_v = (ends.start.y - ends.end.y).abs() < y_tol;
+                let is_iso = is_u || is_v;
+                let u_out = ends.start.x < ext_domain.min().x - x_tol
+                    || ends.start.x > ext_domain.max().x + x_tol;
+                let v_out = ends.start.y < ext_domain.min().y - y_tol
+                    || ends.start.y > ext_domain.max().y + y_tol;
+                let srf_mismatch = ext_surface.type_code() != other_s.type_code();
+                let is_sphere = ext_surface.type_code() == 15014; // SURF_SPHERE_TYPE
+                is_iso && (u_out || v_out || srf_mismatch || is_sphere)
+            } else {
+                false
+            };
+
+            let dropped = if is_iso_discrepancy {
+                surface_of(brep, other_ext_h)?.drop_and_trim_curve::<O>(
+                    k,
+                    &other_ext_domain,
+                    &lifted_curve,
+                    &lifted_curve.natural_interval(),
+                    off_tol / 3.0,
+                    true,
+                    true,
+                    None,
+                )?
+            } else {
+                let mut other_cache =
+                    brep.prepare_surface_solve_cache(k, &other_s, Some(other_ext_h))?;
+                other_s.drop_and_trim_curve_in::<O, O>(
+                    k,
+                    Some(&mut other_cache),
+                    &other_ext_domain,
+                    &lifted_curve,
+                    &lifted_curve.natural_interval(),
+                    off_tol / 3.0,
+                    true,
+                    true,
+                    None,
+                )?
+            };
             let uv_curves = dropped.uv_curves;
             let mut closest_idx = 0usize;
 
