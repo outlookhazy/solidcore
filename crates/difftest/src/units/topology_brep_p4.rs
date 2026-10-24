@@ -721,10 +721,15 @@ fn own_surfaces(b: &mut Brep) -> Result<(), HarnessError> {
             type_code: solidcore::topology::face::p2::TYPE,
             key: ObjectKey(1 + u64::from(f.index())),
         };
+        let mut reowned = false;
         if let Some(s) = b.face_mut(f).map_err(|e| err(&e))?.surface.as_mut() {
             if s.owner() == Some(imported) {
                 let _ = s.set_owner(Some(face_owner(f.index())));
+                reowned = true;
             }
+        }
+        if reowned {
+            b.sync_face_surface_tolerance(f).map_err(|e| err(&e))?;
         }
     }
     // the edge curves' owners (`SmCurve::GetOwner`/`GetEdge`, set by the B-rep build
