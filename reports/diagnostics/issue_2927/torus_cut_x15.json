@@ -1,0 +1,82 @@
+{
+  "body_tolerance": 0.00001,
+  "edges": [
+    {
+      "faces": [
+        0
+      ],
+      "index": 0,
+      "label_pixel": [
+        151.0,
+        626.0
+      ],
+      "length": 203.1654242925153,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        1,
+        0
+      ],
+      "index": 1,
+      "label_pixel": [
+        604.0,
+        244.0
+      ],
+      "length": 64.84672672630755,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        0,
+        2
+      ],
+      "index": 2,
+      "label_pixel": [
+        1023.0,
+        543.0
+      ],
+      "length": 64.84672672630755,
+      "tolerance": 0.00001
+    }
+  ],
+  "faces": [
+    {
+      "index": 0,
+      "label_pixel": [
+        456.0,
+        519.0
+      ],
+      "surface": "torus",
+      "tolerance": 0.00001
+    },
+    {
+      "index": 1,
+      "label_pixel": [
+        533.0,
+        194.0
+      ],
+      "surface": "plane",
+      "tolerance": 0.00001
+    },
+    {
+      "index": 2,
+      "label_pixel": [
+        1094.0,
+        594.0
+      ],
+      "surface": "plane",
+      "tolerance": 0.00001
+    }
+  ],
+  "file": "/tmp/diag_2927/torus_cut_x15.smb",
+  "mesh": {
+    "refused": [],
+    "size": 131.90887642230925,
+    "triangles": 3272
+  },
+  "view": {
+    "azimuth": -35.0,
+    "elevation": 30.0
+  }
+}

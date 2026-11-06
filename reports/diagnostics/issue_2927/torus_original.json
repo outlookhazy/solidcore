@@ -1,0 +1,50 @@
+{
+  "body_tolerance": 0.00001,
+  "edges": [
+    {
+      "faces": [
+        0
+      ],
+      "index": 0,
+      "label_pixel": [
+        894.0,
+        347.0
+      ],
+      "length": 62.83026564898984,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        0
+      ],
+      "index": 1,
+      "label_pixel": [
+        138.0,
+        612.0
+      ],
+      "length": 345.566461069444,
+      "tolerance": 0.00001
+    }
+  ],
+  "faces": [
+    {
+      "index": 0,
+      "label_pixel": [
+        600.0,
+        450.0
+      ],
+      "surface": "torus",
+      "tolerance": 0.00001
+    }
+  ],
+  "file": "/tmp/diag_2927/torus_original.smb",
+  "mesh": {
+    "refused": [],
+    "size": 156.8438714135812,
+    "triangles": 4096
+  },
+  "view": {
+    "azimuth": -35.0,
+    "elevation": 30.0
+  }
+}

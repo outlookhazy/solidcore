@@ -179,3 +179,104 @@ fn torus_off_axis_cuts_never_produce_corrupt_ok_bodies() {
         }
     }
 }
+
+use solidcore::geom::attribute::{AttributeStore, ObjectKey};
+use solidcore::geom::object::ObjectRef;
+use solidcore::topology::api_files::write_brep_to_file;
+use solidcore::topology::brep_data_write::FromBrepEnv;
+use solidcore::topology::topology::NotifyRecords;
+use solidcore::topology::{EdgeId, EdgeuseId, FaceId};
+use solidcore::{Brep, EntityRef};
+
+fn named(e: EntityRef, base: u64) -> ObjectRef {
+    let (type_code, kind, index) = match e {
+        EntityRef::Brep(x) => (16011, 0u64, x.index()),
+        EntityRef::Region(x) => (16012, 1, x.index()),
+        EntityRef::Shell(x) => (16013, 2, x.index()),
+        EntityRef::Faceuse(x) => (16022, 3, x.index()),
+        EntityRef::Face(x) => (16002, 4, x.index()),
+        EntityRef::Loopuse(x) => (16004, 5, x.index()),
+        EntityRef::Loop(x) => (16003, 6, x.index()),
+        EntityRef::Edgeuse(x) => (16005, 7, x.index()),
+        EntityRef::Edge(x) => (16016, 8, x.index()),
+        EntityRef::Vertexuse(x) => (16006, 9, x.index()),
+        EntityRef::Vertex(x) => (16021, 10, x.index()),
+    };
+    ObjectRef {
+        type_code,
+        key: ObjectKey(base + 1 + (kind << 32) + u64::from(index)),
+    }
+}
+
+fn write_smb(k: &Kernel, b: &Brep) -> Result<Vec<u8>, solidcore::SolidError> {
+    let store = AttributeStore::new();
+    let recs = NotifyRecords::new();
+    let key_of = |e| named(e, 0);
+    let env = FromBrepEnv {
+        attributes: &store,
+        key_of: &key_of,
+        records: &recs,
+        curve_key: &|_: EdgeId| ObjectKey(0),
+        uv_curve_key: &|_: EdgeuseId| ObjectKey(0),
+        surface_key: &|_: FaceId| ObjectKey(0),
+    };
+    write_brep_to_file(k, Some(b), &env, true)
+}
+
+/// Diagnostic export: writes SMB models of operands and cut bodies for `solidcore-diag`.
+#[test]
+#[ignore = "diagnostic render export: run with cargo test -p solidcore --test issue_2927_revolved_boolean_difference generate_diagnostic_smb_files -- --ignored"]
+fn generate_diagnostic_smb_files() {
+    let out_dir = std::path::Path::new("/tmp/diag_2927");
+    std::fs::create_dir_all(out_dir).unwrap();
+
+    let mut k = Kernel::default();
+
+    // 1. Cone
+    let cone = create_cone(&mut k, Point3::ZERO, 40.0, 10.0, 50.0).unwrap();
+    std::fs::write(
+        out_dir.join("cone_original.smb"),
+        write_smb(&k, &cone).unwrap(),
+    )
+    .unwrap();
+
+    let tool_cone =
+        create_box(&mut k, Point3::new(0.0, -100.0, -10.0), 200.0, 200.0, 70.0).unwrap();
+    std::fs::write(
+        out_dir.join("cone_tool.smb"),
+        write_smb(&k, &tool_cone).unwrap(),
+    )
+    .unwrap();
+
+    let cut_cone = boolean_difference(&mut k, cone, tool_cone).unwrap();
+    std::fs::write(
+        out_dir.join("cone_cut_x0.smb"),
+        write_smb(&k, &cut_cone).unwrap(),
+    )
+    .unwrap();
+
+    // 2. Torus
+    let torus = create_torus(&mut k, Point3::ZERO, 45.0, 10.0).unwrap();
+    std::fs::write(
+        out_dir.join("torus_original.smb"),
+        write_smb(&k, &torus).unwrap(),
+    )
+    .unwrap();
+
+    let tool_torus =
+        create_box(&mut k, Point3::new(15.0, -100.0, -30.0), 200.0, 200.0, 60.0).unwrap();
+    std::fs::write(
+        out_dir.join("torus_tool.smb"),
+        write_smb(&k, &tool_torus).unwrap(),
+    )
+    .unwrap();
+
+    let cut_torus = boolean_difference(&mut k, torus, tool_torus).unwrap();
+    std::fs::write(
+        out_dir.join("torus_cut_x15.smb"),
+        write_smb(&k, &cut_torus).unwrap(),
+    )
+    .unwrap();
+
+    println!("Successfully exported SMB models to {}", out_dir.display());
+}

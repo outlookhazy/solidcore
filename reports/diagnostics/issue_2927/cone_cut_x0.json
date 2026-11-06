@@ -1,0 +1,131 @@
+{
+  "body_tolerance": 0.00001,
+  "edges": [
+    {
+      "faces": [
+        0,
+        1
+      ],
+      "index": 0,
+      "label_pixel": [
+        302.0,
+        759.0
+      ],
+      "length": 125.66053129797957,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        0,
+        2
+      ],
+      "index": 1,
+      "label_pixel": [
+        604.0,
+        122.0
+      ],
+      "length": 31.415132824494894,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        3,
+        0
+      ],
+      "index": 2,
+      "label_pixel": [
+        881.0,
+        478.0
+      ],
+      "length": 58.309518948453004,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        0,
+        3
+      ],
+      "index": 3,
+      "label_pixel": [
+        529.0,
+        227.0
+      ],
+      "length": 58.309518948453004,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        3,
+        1
+      ],
+      "index": 4,
+      "label_pixel": [
+        705.0,
+        618.0
+      ],
+      "length": 80.0,
+      "tolerance": 0.00001
+    },
+    {
+      "faces": [
+        3,
+        2
+      ],
+      "index": 5,
+      "label_pixel": [
+        705.0,
+        86.0
+      ],
+      "length": 19.999999999999996,
+      "tolerance": 0.00001
+    }
+  ],
+  "faces": [
+    {
+      "index": 0,
+      "label_pixel": [
+        526.0,
+        468.0
+      ],
+      "surface": "cone",
+      "tolerance": 0.00001
+    },
+    {
+      "index": 1,
+      "label_pixel": [
+        534.0,
+        678.0
+      ],
+      "surface": "plane",
+      "tolerance": 0.00001
+    },
+    {
+      "index": 2,
+      "label_pixel": [
+        662.0,
+        101.0
+      ],
+      "surface": "plane",
+      "tolerance": 0.00001
+    },
+    {
+      "index": 3,
+      "label_pixel": [
+        705.0,
+        406.0
+      ],
+      "surface": "plane",
+      "tolerance": 0.00001
+    }
+  ],
+  "file": "/tmp/diag_2927/cone_cut_x0.smb",
+  "mesh": {
+    "refused": [],
+    "size": 102.46950765959599,
+    "triangles": 1014
+  },
+  "view": {
+    "azimuth": -35.0,
+    "elevation": 30.0
+  }
+}
