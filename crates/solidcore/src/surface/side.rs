@@ -697,7 +697,7 @@ impl Surface {
         };
         let mid = 0.5 * (from + to);
         let fixed = side.at(dom);
-        let rounding = Rounding::of(&form, &[fixed, from, to], OP_DIAMETER)?;
+        let rounding = Rounding::local(&form, !side.is_u(), fixed, from, to, OP_DIAMETER)?;
         let mut pieces = Vec::new();
         let mut levels = 0;
         for (a, b) in [(from, mid), (mid, to)] {
