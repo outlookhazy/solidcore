@@ -46,9 +46,21 @@ impl crate::session::Answer for Done {
     }
 }
 
+const SIGN_ACCURACY: f64 = 1e-3;
+
 /// The result contract of a boolean ([`finish`]): faces left, and a solid in gives a solid out,
 /// solids touching along an edge or at a vertex allowed.
-fn finished(k: &mut Kernel, r: Brep, expect: Expect) -> KernelResult<Done> {
+fn finished(k: &mut Kernel, mut r: Brep, expect: Expect) -> KernelResult<Done> {
+    if expect.solid() && !r.face_list().is_empty() {
+        if !solidcore::topology::brep::is_outward_touching_solids(k, &mut r)? {
+            return Ok(Done::Refused(Error::NotSolid));
+        }
+        let vol =
+            solidcore::mass::integrator::properties::brep_volume_default(k, &mut r, SIGN_ACCURACY)?;
+        if vol <= 0.0 || vol.is_nan() {
+            return Ok(Done::Refused(Error::NotSolid));
+        }
+    }
     Ok(match finish(k, r, expect.touching())? {
         Ok(b) => Done::Body(Box::new(b)),
         Err(Error::Empty) => Done::Empty,
@@ -60,7 +72,7 @@ fn finished(k: &mut Kernel, r: Brep, expect: Expect) -> KernelResult<Done> {
 fn expect_of(k: &mut Kernel, operands: &mut [Brep]) -> KernelResult<Expect> {
     let mut all = true;
     for b in operands.iter_mut() {
-        all &= Expect::of(k, b)? != Expect::FACES;
+        all &= solidcore::topology::brep::is_outward_touching_solids(k, b)?;
     }
     Ok(if all { Expect::SOLID } else { Expect::FACES })
 }

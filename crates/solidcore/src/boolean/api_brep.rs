@@ -219,6 +219,8 @@ fn merge_boolean(
         .map(|(outcome, _)| outcome)
 }
 
+const SIGN_ACCURACY: f64 = 1e-3;
+
 /// [`merge_boolean`] running `method`, with the merge's common edges on the first
 /// B-rep (`SmMerge::m_vEdges`) as it left them.
 fn merge_boolean_by(
@@ -316,10 +318,58 @@ pub fn boolean_union(k: &mut Kernel, brep1: Brep, brep2: Brep) -> Result<Brep> {
 ///
 /// # Errors
 ///
-/// The merge's error ([`SolidError::Unported`] until `SmMerge` is ported).
+/// The merge's error ([`SolidError::Unported`] until `SmMerge` is ported) or
+/// [`SolidError::Degenerate`] if the resulting solid violates pointer integrity,
+/// positive volume, or volume monotonicity invariants.
 pub fn boolean_difference(k: &mut Kernel, brep1: Brep, brep2: Brep) -> Result<Brep> {
     validate_boolean_operands(BooleanOperation::Difference)?;
-    merge_boolean(k, brep1, brep2, BooleanOperation::Difference, None).map(|o| o.result)
+    let is_solid = is_manifold_solid(&brep1)? && is_manifold_solid(&brep2)?;
+    let orig_vol = if is_solid {
+        let mut copy = crate::boolean::merge::p3::copy_brep(k, &brep1, None, None, true, false)?;
+        Some(crate::mass::integrator::properties::brep_volume_default(
+            k,
+            &mut copy,
+            SIGN_ACCURACY,
+        )?)
+    } else {
+        None
+    };
+    let result =
+        merge_boolean(k, brep1, brep2, BooleanOperation::Difference, None).map(|o| o.result)?;
+    if is_solid && !result.face_list().is_empty() {
+        if let Err(e) = crate::topology::integrity::check(&result) {
+            if e.is_unported_or_cancelled() {
+                return Err(e);
+            }
+            return Err(SolidError::Degenerate {
+                operation: OP_BOOLEAN,
+                entity: None,
+            });
+        }
+        let mut copy_res =
+            crate::boolean::merge::p3::copy_brep(k, &result, None, None, true, false)?;
+        let vol = crate::mass::integrator::properties::brep_volume_default(
+            k,
+            &mut copy_res,
+            SIGN_ACCURACY,
+        )?;
+        if vol < 0.0 || vol.is_nan() {
+            return Err(SolidError::Degenerate {
+                operation: OP_BOOLEAN,
+                entity: None,
+            });
+        }
+        if let Some(orig) = orig_vol {
+            let tol = 1e-4 * orig.abs().max(1.0);
+            if vol > orig + tol {
+                return Err(SolidError::Degenerate {
+                    operation: OP_BOOLEAN,
+                    entity: None,
+                });
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Intersects two B-reps (`SmApiBooleanIntersection`); `brep2` is consumed.
