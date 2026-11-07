@@ -1384,12 +1384,13 @@ impl Local {
         let (mut err_h, mut err_w, mut ext_local) = (0.0_f64, 0.0_f64, Vec::new());
         for (pn, pn1) in ends_local {
             let leg = lin(rho, pn, -1.0, pn1);
+            let exact_constant_weight = !self.rational || (pn[3] == pn1[3] && rho == 1.0);
             let q: Vec<H> = (1..=p)
                 .map(|i| {
                     #[allow(clippy::cast_precision_loss)]
                     let t = c * i as f64;
                     let mut pt = lin(1.0, pn, t, leg);
-                    if !self.rational || leg[3] == 0.0 {
+                    if exact_constant_weight {
                         pt[3] = pn[3];
                     }
                     pt
@@ -1397,7 +1398,7 @@ impl Local {
                 .collect();
             let mh = |x: H| x[0].abs().max(x[1].abs()).max(x[2].abs());
             err_h = err_h.max(gamma(6) * (mh(pn) + c * pf * (rho.abs() * mh(pn) + mh(pn1))));
-            if self.rational && leg[3] != 0.0 {
+            if self.rational && !exact_constant_weight {
                 let mw = |x: H| x[3].abs();
                 err_w = err_w.max(gamma(6) * (mw(pn) + c * pf * (rho.abs() * mw(pn) + mw(pn1))));
             }
