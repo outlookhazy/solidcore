@@ -264,7 +264,7 @@ fn knot_window(kv: &[f64], a: f64, b: f64, margin: usize) -> (f64, f64) {
 /// `(t - u_i) / (u_(i+q-j+1) - u_i)` from the knots `u_(s-q+1) .. u_(s+q)` only.
 fn extraction_window(kv: &[f64], t: f64, q: usize) -> (f64, f64) {
     let s = kv.iter().rposition(|&x| x <= t).unwrap_or(0);
-    let (lo, hi) = (s.saturating_sub(q), s.saturating_add(q));
+    let (lo, hi) = ((s + 1).saturating_sub(q), s.saturating_add(q));
     let window: Vec<f64> = kv
         .iter()
         .enumerate()
@@ -374,34 +374,7 @@ impl Rounding {
         Self::with_ratio_in(nurb, ratio, op, &keep)
     }
 
-    fn of(form: &BSplineSurface, extra: &[f64], op: &'static str) -> Result<Self> {
-        let nurb = form.gw_nurb().ok_or_else(|| SolidError::sm_err(op))?;
-        let (mut kmax, mut smin) = (0.0_f64, f64::INFINITY);
-        for kv in [nurb.u_knots(), nurb.v_knots()] {
-            for (&a, &b) in kv.iter().zip(kv.iter().skip(1)) {
-                kmax = kmax.max(a.abs()).max(b.abs());
-                if b > a {
-                    smin = smin.min(b - a);
-                }
-            }
-        }
-        for &x in extra {
-            kmax = kmax.max(x.abs());
-        }
-        Self::with_ratio(nurb, kmax / smin, op)
-    }
-
-    /// The rounding of a net whose coefficients' knots and parameters are at most `ratio`
-    /// times the least span they divide by (`K / S`).
-    fn with_ratio(
-        nurb: &crate::nurbs::srf_basic::Surface,
-        ratio: f64,
-        op: &'static str,
-    ) -> Result<Self> {
-        Self::with_ratio_in(nurb, ratio, op, &|_, _| true)
-    }
-
-    /// [`Rounding::with_ratio`] over the control points `keep` names (`[i along u][j along
+    /// [`Rounding::with_ratio_in`] over the control points `keep` names (`[i along u][j along
     /// v]`): the pieces' points are combinations of those alone.
     fn with_ratio_in(
         nurb: &crate::nurbs::srf_basic::Surface,

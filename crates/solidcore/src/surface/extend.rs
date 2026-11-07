@@ -1325,7 +1325,11 @@ impl Local {
     /// Ruled: each row continued by the homogeneous line `H_n + s D`, `D = (p / h) (rho
     /// H_n - H_(n-1))` with one `rho`, the rows' largest `w_(n-1) / w_n` (module docs),
     /// written by degree elevation over `[b, b + e]`: the points `H_n + (i e / h) (rho H_n -
-    /// H_(n-1))`, all four coordinates. Its bound: the points' rounding.
+    /// H_(n-1))`, all four coordinates.
+    ///
+    /// In a local frame: each row is translated by its own origin `O_j` (its end point),
+    /// continued along its local line, and its new points translated back, exactly as
+    /// [`Self::natural`]; the 3D bound is that of the local construction ([`Self::frame`]).
     fn ruled(&self, e: f64) -> Result<Self> {
         let b = self.end()?;
         let h = b - self.before_end(0)?;
@@ -1333,41 +1337,115 @@ impl Local {
         #[allow(clippy::cast_precision_loss)]
         let pf = p as f64;
         let c = e / h;
-        let mut ends = Vec::new();
-        for row in &self.rows {
+        // each row's origin: its end point
+        let origins: Vec<[f64; 3]> = self
+            .rows
+            .iter()
+            .map(|r| {
+                let x = r.last().ok_or_else(op_err)?;
+                let w = if self.rational { x[3] } else { 1.0 };
+                if !(w.is_finite() && w > 0.0) {
+                    return Err(SolidError::invalid_input(
+                        OP,
+                        "a weight that is not positive",
+                    ));
+                }
+                Ok([x[0] / w, x[1] / w, x[2] / w])
+            })
+            .collect::<Result<_>>()?;
+        let mut local = self.clone();
+        let mut moved = 0.0_f64;
+        for (r, o) in local.rows.iter_mut().zip(&origins) {
+            for x in r.iter_mut() {
+                let w = x[3];
+                for (v, &oc) in x.iter_mut().zip(o) {
+                    moved = moved.max(v.abs() + (w * oc).abs());
+                    *v -= w * oc;
+                }
+            }
+        }
+        let mut ends_local = Vec::new();
+        for row in &local.rows {
             let mut back = row.iter().rev();
             let (Some(&pn), Some(&pn1)) = (back.next(), back.next()) else {
                 return Err(op_err());
             };
-            ends.push((pn, pn1));
+            ends_local.push((pn, pn1));
         }
         // one rho for every row (any one keeps the surface C1); the largest keeps every
         // weight at least its row's end weight: w_n (1 + (i e / h) (rho - rho_j))
         let rho = if self.rational {
-            ends.iter()
+            ends_local
+                .iter()
                 .fold(f64::NEG_INFINITY, |m, (pn, pn1)| m.max(pn1[3] / pn[3]))
         } else {
             1.0
         };
-        let (mut err, mut ext) = (0.0_f64, Vec::new());
-        for (pn, pn1) in ends {
+        let (mut err_h, mut err_w, mut ext_local) = (0.0_f64, 0.0_f64, Vec::new());
+        for (pn, pn1) in ends_local {
             let leg = lin(rho, pn, -1.0, pn1);
             let q: Vec<H> = (1..=p)
                 .map(|i| {
                     #[allow(clippy::cast_precision_loss)]
                     let t = c * i as f64;
-                    lin(1.0, pn, t, leg)
+                    let mut pt = lin(1.0, pn, t, leg);
+                    if !self.rational || leg[3] == 0.0 {
+                        pt[3] = pn[3];
+                    }
+                    pt
                 })
                 .collect();
-            // rounding: the leg (a product and a difference), t (two products) and the point
-            // (a product and a sum), gamma_6 of the terms' magnitudes
-            let m = |x: H| x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-            err = err.max(gamma(6) * (m(pn) + c * pf * (rho.abs() * m(pn) + m(pn1))));
-            ext.push(q);
+            let mh = |x: H| x[0].abs().max(x[1].abs()).max(x[2].abs());
+            err_h = err_h.max(gamma(6) * (mh(pn) + c * pf * (rho.abs() * mh(pn) + mh(pn1))));
+            if self.rational && leg[3] != 0.0 {
+                let mw = |x: H| x[3].abs();
+                err_w = err_w.max(gamma(6) * (mw(pn) + c * pf * (rho.abs() * mw(pn) + mw(pn1))));
+            }
+            ext_local.push(q);
+        }
+        err_h += self.err + gamma(2) * moved;
+        let (mut wmin, mut pmax, mut back) = (f64::INFINITY, 0.0_f64, 0.0_f64);
+        for x in local
+            .rows
+            .iter()
+            .flatten()
+            .chain(ext_local.iter().flatten())
+        {
+            let w = if self.rational { x[3] } else { 1.0 };
+            wmin = wmin.min(w);
+            pmax = pmax.max((x[0].abs() + x[1].abs() + x[2].abs()) / w.abs());
+        }
+        let ext: Vec<Vec<H>> = ext_local
+            .into_iter()
+            .zip(&origins)
+            .map(|(r, o)| {
+                r.into_iter()
+                    .map(|mut x| {
+                        let w = x[3];
+                        for (v, &oc) in x.iter_mut().zip(o) {
+                            back = back.max(v.abs() + (w * oc).abs());
+                            *v += w * oc;
+                        }
+                        x
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut diam = 0.0_f64;
+        for (i, oi) in origins.iter().enumerate() {
+            for oj in origins.iter().skip(i + 1).take(self.q) {
+                let dist = (oi[0] - oj[0]).abs() + (oi[1] - oj[1]).abs() + (oi[2] - oj[2]).abs();
+                diam = diam.max(dist);
+            }
         }
         let knots = vec![b + e; p + 1];
         let mut out = self.joined(ext, &knots)?;
-        out.err = self.err.max(err);
+        out.err = err_h.max(err_w);
+        let frame_bound = (((2.0 * err_h + (pmax + diam) * err_w) * (1.0 + gamma(4))
+            + 2.0 * gamma(2) * back)
+            / wmin)
+            * (1.0 + gamma(8));
+        out.frame = Some(frame_bound);
         Ok(out)
     }
 

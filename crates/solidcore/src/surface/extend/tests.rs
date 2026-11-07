@@ -1654,6 +1654,34 @@ fn a_ball_patch_extends_its_own_net_on_its_sphere_up_to_its_caps() {
     }
 }
 
+/// Issue #3000: huge extension of one side of a bilinear sheet must not make opposite side
+/// read as collapsed, and a four-side ruled extension of 5e8 certifies exact.
+#[test]
+fn extend_bilinear_sheet_huge_all_sides_meet_stop() {
+    let kk = k();
+    let s = spline(
+        &[
+            vec![[0.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]],
+            vec![[1.0, 0.0, 0.0625, 1.0], [1.0, 1.0, 0.1875, 1.0]],
+        ],
+        1,
+        1,
+        &[0.0, 0.0, 1.0, 1.0],
+        &[0.0, 0.0, 1.0, 1.0],
+        true,
+    );
+    let all = s
+        .extended_sides_keeping_parameters(&kk, &BoxSide::ALL, Continuity::Ruled, 5e8)
+        .unwrap();
+    for (side, done) in BoxSide::ALL.iter().zip(all.sides) {
+        let SideExtension::Extended(a) = done else {
+            panic!("{side:?}: expected Extended, got {done:?}");
+        };
+        let tol = (1e-6_f64 * 5e8).max(a.truncation + a.rounding);
+        assert!((a.enclosure.mid() - 5e8).abs() <= tol, "{side:?}: {a:?}");
+    }
+}
+
 /// A small plane far from the origin extended far, keeping its parameters: the end cap of a
 /// bar at (147..152, -25.5, 846..852), 5.83 mm square, turned 2 degrees about x by a draft,
 /// extended 547.405 past every side by the draft's local operation (its placement and net as
