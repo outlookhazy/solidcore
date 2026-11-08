@@ -128,6 +128,8 @@ const SOLVE_TRIES: usize = 200;
 const BACK_OFFS: usize = 30;
 /// Halvings that find the longest extension with positive weights.
 const BISECTIONS: usize = 60;
+/// Halvings across IEEE-754's exponent range to find an initial workable ask below a huge `e`.
+const EXP_HALVINGS: usize = (f64::MAX_EXP - f64::MIN_EXP) as usize;
 
 /// Growth steps of [`Local::least_step`] (each closes the rounding shortfall; two do).
 const LEAST_STEP_TRIES: usize = 8;
@@ -319,10 +321,24 @@ impl Surface {
             }
             let bound = grown.bound();
             let out = grown.surface(side)?;
-            Ok(Some((
-                Some(Surface::from(BSplineSurface::from_gw_nurb(&out))),
-                bound,
-            )))
+            let bs = BSplineSurface::from_gw_nurb(&out);
+            // `BSplineSurface::from_gw_nurb` runs `fixup_knot_vector` with `scaled_zero` sized by
+            // the new end knot `b + e`: an ask so large that `scaled_zero` merges a source knot
+            // span along `side` does not keep the source bit for bit, so treat it as unproved
+            // (`Says::Unproved`) and let `solve` / `longest_workable` bracket below the merge
+            // threshold. Any change to the source's control points or across-direction knots when
+            // the along-knots kept remains a broken invariant (`PortInvariant`).
+            let fixed = bs.gw_nurb().ok_or_else(|| SolidError::sm_err(OP))?;
+            if !keeps_along_knots(net, fixed, side)? {
+                return Ok(Some((None, f64::INFINITY)));
+            }
+            if !product && !keeps(net, fixed, side)? {
+                return Err(SolidError::port_invariant(
+                    OP,
+                    "the extension moved the source's net",
+                ));
+            }
+            Ok(Some((Some(Surface::from(bs)), bound)))
         };
         // a length past the measure's leaf budget is no measurement, as a leaf not converged
         let across = |m: &Option<Surface>| match m
@@ -660,30 +676,52 @@ fn solve(
     };
     // the longest ask below `e` found measured to the stop at its own length, by halving
     // (`made` and the measure at each), stopping early at one that reaches d: its ask, its
-    // length's lower bound and its middle
+    // length's lower bound and its middle. First halve `hi` across IEEE-754's exponent range
+    // until a workable ask brackets `(lo, hi)` (asks whose along-knots merge in
+    // `fixup_knot_vector` or whose net overflows return unproved from `made` without
+    // measuring), then bisect `(lo, hi)` across the mantissa (`BISECTIONS`).
     let longest_workable = |e: f64| -> Result<Option<(f64, f64, f64)>> {
-        let (mut lo, mut hi) = (0.0_f64, e);
-        let mut found: Option<(f64, f64, f64)> = None;
-        for _ in 0..BISECTIONS {
-            let m = (0.5 * (lo + hi)).max(least);
-            if !(m > lo && m < hi) {
-                break;
-            }
-            let at = match made(m)? {
+        let workable_at = |m: f64| -> Result<Option<(f64, f64)>> {
+            Ok(match made(m)? {
                 Some(s) => {
                     let b = across(&s.0)?;
                     workable(b.as_ref(), s.1).map(|l| (l, b.map_or(0.0, |b| b.enclosure.mid())))
                 }
                 None => None,
-            };
-            if let Some((l, mid)) = at {
+            })
+        };
+        let (mut lo, mut hi) = (0.0_f64, e);
+        let mut found: Option<(f64, f64, f64)> = None;
+        for _ in 0..EXP_HALVINGS {
+            let m = (0.5 * hi).max(least);
+            if !(m > 0.0 && m < hi) {
+                break;
+            }
+            if let Some((l, mid)) = workable_at(m)? {
                 lo = m;
                 found = Some((m, l, mid));
                 if l >= d {
+                    return Ok(found);
+                }
+                break;
+            }
+            hi = m;
+        }
+        if lo > 0.0 {
+            for _ in 0..BISECTIONS {
+                let m = (0.5 * (lo + hi)).max(least);
+                if !(m > lo && m < hi) {
                     break;
                 }
-            } else {
-                hi = m;
+                if let Some((l, mid)) = workable_at(m)? {
+                    lo = m;
+                    found = Some((m, l, mid));
+                    if l >= d {
+                        break;
+                    }
+                } else {
+                    hi = m;
+                }
             }
         }
         Ok(found)
@@ -986,8 +1024,9 @@ struct Local {
     /// The degree across the rows (the other direction's): `q + 1` consecutive rows make a
     /// point of the surface.
     q: usize,
-    /// The 3D bound of a construction made in a local frame ([`Self::natural`]), which
-    /// [`Self::bound`] returns in place of the one from [`Self::err`].
+    /// The 3D bound of a construction made in a local frame ([`Self::natural`], [`Self::ruled`],
+    /// [`Self::mirrored_by`]), which [`Self::bound`] returns in place of the one from
+    /// [`Self::err`].
     frame: Option<f64>,
     /// The knots across the rows (the other direction's), of degree [`Self::q`].
     across: Vec<f64>,
@@ -1418,51 +1457,20 @@ impl Local {
         })
     }
 
-    /// Each row's origin: its end point (any point would do: it is exact by choice), for a
-    /// construction made in a local frame ([`Self::natural`], [`Self::mirrored_by`]).
-    fn row_origins(&self) -> Result<Vec<[f64; 3]>> {
-        self.rows
-            .iter()
-            .map(|r| {
-                let x = r.last().ok_or_else(op_err)?;
-                let w = if self.rational { x[3] } else { 1.0 };
-                if !(w.is_finite() && w > 0.0) {
-                    return Err(SolidError::invalid_input(
-                        OP,
-                        "a weight that is not positive",
-                    ));
-                }
-                Ok([x[0] / w, x[1] / w, x[2] / w])
-            })
-            .collect()
-    }
-
     /// Tangent (`curvature` false) or Curvature past the side by `e`: mirror steps, each
-    /// mirroring at most the last piece, made in the rows' local frame, as [`Self::natural`]'s. Each
-    /// row is translated by its own origin ([`Self::row_origins`], `H' = H - w O_j`, weights
+    /// mirroring at most the last piece, built in [`LocalFrame`] as [`Self::natural`] and
+    /// [`Self::ruled`]. Each row is translated by its end point `O_j` (`H' = H - w O_j`, weights
     /// unchanged), so the mirror's rounding, its gain and the C2 row's are relative to the
-    /// rows' local size, not to the part's distance from the origin; the translations round
-    /// once each, the way back not amplified. The source's rows are kept as they are, and the
-    /// 3D bound ([`Self::bound`]) is that of the local construction ([`Self::frame`]), as
-    /// [`Self::natural`]'s.
+    /// rows' local size rather than the part's distance from the origin; the new points are
+    /// translated back after the source's untouched rows, and [`LocalFrame::finish`] sets the
+    /// 3D bound on `[b, cur.end()]` ([`Self::frame`]).
     fn mirrored_by(&self, curvature: bool, e: f64) -> Result<Self> {
-        let origins = self.row_origins()?;
-        let mut local = self.clone();
-        let mut moved = 0.0_f64;
-        for (r, o) in local.rows.iter_mut().zip(&origins) {
-            for x in r.iter_mut() {
-                let w = x[3];
-                for (v, &oc) in x.iter_mut().zip(o) {
-                    // the difference rounds by one ulp of its result; the product `w O` too,
-                    // unless the weight is exactly 1 (a polynomial net)
-                    *v -= w * oc;
-                    let product = if self.rational { (w * oc).abs() } else { 0.0 };
-                    moved = moved.max(v.abs() + product);
-                }
-            }
+        let frame = LocalFrame::of(self)?;
+        let mut cur = frame.local.clone();
+        if self.rational {
+            // `Local::mirrored` bounds all four coordinates of `R^4` together from `self.err`.
+            cur.err = cur.err.max(cur.err_w);
         }
-        local.err = self.err + gamma(2) * moved;
-        let mut cur = local;
         let mut left = e;
         let mut steps = 0;
         while left > 0.0 {
@@ -1508,69 +1516,56 @@ impl Local {
             cur = cur.mirrored(refl, curvature)?;
             left -= step;
         }
-        // the extension's points back in the part's frame, after the source's rows as they are
-        let (mut wmin, mut pmax, mut back) = (f64::INFINITY, 0.0_f64, 0.0_f64);
-        for x in cur.rows.iter().flatten() {
-            let w = if self.rational { x[3] } else { 1.0 };
-            wmin = wmin.min(w);
-            pmax = pmax.max((x[0].abs() + x[1].abs() + x[2].abs()) / w.abs());
-        }
-        let mut rows = Vec::new();
-        for ((src, grown), o) in self.rows.iter().zip(&cur.rows).zip(&origins) {
-            let mut row = src.clone();
-            for x in grown.get(src.len()..).ok_or_else(op_err)? {
-                let mut x = *x;
-                let w = x[3];
-                for (v, &oc) in x.iter_mut().zip(o) {
-                    back = back.max(v.abs() + (w * oc).abs());
-                    *v += w * oc;
-                }
-                row.push(x);
-            }
-            rows.push(row);
-        }
-        let diam = origin_diameter(&origins, self.q);
-        let mut out = cur;
-        out.rows = rows;
-        out.frame = Some(frame_bound(out.err, out.err_w, pmax + diam, back, wmin));
-        Ok(out)
+        let keep = self.knots.len().checked_sub(1).ok_or_else(op_err)?;
+        let knots = cur.knots.get(keep..).ok_or_else(op_err)?;
+        let ext_local: Vec<Vec<H>> = self
+            .rows
+            .iter()
+            .zip(&cur.rows)
+            .map(|(src, grown)| grown.get(src.len()..).map(<[H]>::to_vec).ok_or_else(op_err))
+            .collect::<Result<_>>()?;
+        frame.finish(self, ext_local, knots, cur.err, cur.err_w)
     }
 
     /// Natural: the last span's Bezier points (from a copy with its start knot at multiplicity
     /// `p`) continued past `b` by de Casteljau at `t = 1 + e / (b - c)`: the points
     /// `blossom(1^(p-i), t^i)` are the polynomial's Bezier points over `[b, b + e]`.
     ///
-    /// In a local frame: each row is translated by its own origin `O_j` (its end point), `H'
-    /// = H - w O_j` (the weights unchanged), continued, and its new points translated back,
-    /// `H = H' + w O_j`; the source's rows are kept as they are. Translation commutes with the
-    /// continuation (both are linear in the homogeneous points and keep the weights), so the
-    /// construction is the same; only its rounding changes. The continuation amplifies its
-    /// input's and its own rounding by `a^p` (`a = |1 - t| + |t|`), which is now relative to
-    /// the rows' local size, not to their absolute coordinates; the translations round once
-    /// each, the way back not amplified. The 3D bound ([`Self::bound`]) is then that of the
-    /// local construction ([`Self::frame`]).
+    /// Built in [`LocalFrame`]: each row is translated by its end point `O_j`, continued, and
+    /// its new points translated back, keeping the source's rows bit for bit. De Casteljau's
+    /// amplification `a^p` (`a = |1 - t| + |t|`) scales only the local span's size and input
+    /// error; [`LocalFrame::finish`] bounds the 3D distance on `[b, b + e]` ([`Self::frame`]).
     fn natural(&self, e: f64) -> Result<Self> {
         let b = self.end()?;
         let c = self.before_end(0)?;
         let p = self.p;
-        let origins = self.row_origins()?;
-        // the rows translated: one product and one difference a coordinate
-        let mut local = self.clone();
-        let mut moved = 0.0_f64;
-        for (r, o) in local.rows.iter_mut().zip(&origins) {
-            for x in r.iter_mut() {
-                let w = x[3];
-                for (v, &oc) in x.iter_mut().zip(o) {
-                    moved = moved.max(v.abs() + (w * oc).abs());
-                    *v -= w * oc;
-                }
-            }
-        }
-        local.err = self.err + gamma(2) * moved;
-        let span = if c > local.start()? {
-            local.with_knot(c)?
+        let needs_insert = c > self.start()? && self.knots.iter().filter(|&&x| x == c).count() < p;
+        let frame = LocalFrame::of(self)?;
+        let (span, span_err) = if needs_insert {
+            let s = frame.local.with_knot(c)?;
+            let e = s.err;
+            (s, e)
         } else {
-            local.clone()
+            (frame.local.clone(), frame.tail_err_h(self, Some(p + 1)))
+        };
+        let span_size = if needs_insert {
+            span.size()
+        } else {
+            span.rows
+                .iter()
+                .flat_map(|r| r.iter().rev().take(p + 1))
+                .flat_map(|h| [h[0].abs(), h[1].abs(), h[2].abs()])
+                .fold(0.0_f64, f64::max)
+        };
+        let span_w_size = if needs_insert {
+            span.weight_size()
+        } else if self.rational {
+            span.rows
+                .iter()
+                .flat_map(|r| r.iter().rev().take(p + 1))
+                .fold(0.0_f64, |m, h| m.max(h[3].abs()))
+        } else {
+            0.0
         };
         let t = 1.0 + e / (b - c);
         let ext_local: Vec<Vec<H>> = span
@@ -1598,62 +1593,32 @@ impl Local {
         let a = (1.0 - t).abs() + t.abs();
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let amp = a.powi(p as i32);
-        let err_local = amp * (span.err + gamma(3 * p + 3) * span.size());
-        // the weights' own: not translated, combined of weights alone (none on a polynomial
-        // net, its weights stored as exactly 1)
-        let err_local_w = if self.rational {
-            amp * (span.err_w + gamma(3 * p + 3) * span.weight_size())
+        let err_h = amp * (span_err + gamma(3 * p + 3) * span_size);
+        let err_w = if self.rational {
+            amp * (span.err_w + gamma(3 * p + 3) * span_w_size)
         } else {
             0.0
         };
-        // the local frame's extent: its points' largest l1 size over their weight, the
-        // smallest weight (the source's rows and the new ones), and the new rows translated
-        // back, each coordinate one product and one sum
-        let (mut wmin, mut pmax, mut back) = (f64::INFINITY, 0.0_f64, 0.0_f64);
-        for x in local
-            .rows
-            .iter()
-            .flatten()
-            .chain(ext_local.iter().flatten())
-        {
-            let w = if self.rational { x[3] } else { 1.0 };
-            wmin = wmin.min(w);
-            pmax = pmax.max((x[0].abs() + x[1].abs() + x[2].abs()) / w.abs());
-        }
-        let ext: Vec<Vec<H>> = ext_local
-            .into_iter()
-            .zip(&origins)
-            .map(|(r, o)| {
-                r.into_iter()
-                    .map(|mut x| {
-                        let w = x[3];
-                        for (v, &oc) in x.iter_mut().zip(o) {
-                            back = back.max(v.abs() + (w * oc).abs());
-                            *v += w * oc;
-                        }
-                        x
-                    })
-                    .collect()
-            })
-            .collect();
-        let diam = origin_diameter(&origins, self.q);
         let knots = vec![b + e; p + 1];
-        let mut out = self.joined(ext, &knots)?;
-        out.err = err_local;
-        out.err_w = err_local_w;
-        // `S = sum N (H' + w O_j) / sum N w`: an error of at most `err_local` in each local
-        // point coordinate and `err_local_w` in each weight moves it at most `sqrt 3
-        // err_local + |S - O_j| err_local_w`, with `|S - O_j| <= pmax + diam` for every row j
-        // at the point; the way back's rounding `gamma_2 back` in each coordinate moves it at
-        // most `sqrt 3` of that over the weight
-        out.frame = Some(frame_bound(err_local, err_local_w, pmax + diam, back, wmin));
-        Ok(out)
+        frame.finish(self, ext_local, &knots, err_h, err_w)
     }
 
     /// Ruled: each row continued by the homogeneous line `H_n + s D`, `D = (p / h) (rho
     /// H_n - H_(n-1))` with one `rho`, the rows' largest `w_(n-1) / w_n` (module docs),
     /// written by degree elevation over `[b, b + e]`: the points `H_n + (i e / h) (rho H_n -
-    /// H_(n-1))`, all four coordinates. Its bound: the points' rounding.
+    /// H_(n-1))`, all four coordinates.
+    ///
+    /// Built in [`LocalFrame`] reading only the last two points `(pn, pn1)` of each row:
+    /// - Spatial coordinates carry `amp * err_h_in + c * p * drho * |pn|_h +`
+    ///   `gamma_6 * (|pn|_h + c * p * (|rho| |pn|_h + |pn1|_h))`, with
+    ///   `amp = (1 + c * p * (|rho| + 1)) (1 + gamma_4)` the Lipschitz gain of
+    ///   `(1 + t rho) pn - t pn1` at `t <= c * p`.
+    /// - When the row is polynomial, or when `err_w_in == 0`, `drho == 0`, `pn[3] == pn1[3]`
+    ///   and `rho == 1`, IEEE-754 evaluates `leg[3] = 1 * pn[3] - 1 * pn[3] == 0` and
+    ///   `1 * pn[3] + t * 0 == pn[3]` bit-for-bit (`row_err_w = 0`); otherwise weights carry
+    ///   `amp * err_w_in + c * p * drho * |pn[3]| + gamma_6 * (|pn[3]| + c * p * (|rho|`
+    ///   `|pn[3]| + |pn1[3]|))`, so prior rational step weight errors and differing row weights
+    ///   are both bounded in [`LocalFrame::finish`].
     fn ruled(&self, e: f64) -> Result<Self> {
         let b = self.end()?;
         let h = b - self.before_end(0)?;
@@ -1661,25 +1626,60 @@ impl Local {
         #[allow(clippy::cast_precision_loss)]
         let pf = p as f64;
         let c = e / h;
-        let mut ends = Vec::new();
-        for row in &self.rows {
+        let frame = LocalFrame::of(self)?;
+        let err_h_in = frame.tail_err_h(self, Some(2));
+        let mut ends_local = Vec::new();
+        for row in &frame.local.rows {
             let mut back = row.iter().rev();
             let (Some(&pn), Some(&pn1)) = (back.next(), back.next()) else {
                 return Err(op_err());
             };
-            ends.push((pn, pn1));
+            ends_local.push((pn, pn1));
         }
         // one rho for every row (any one keeps the surface C1); the largest keeps every
         // weight at least its row's end weight: w_n (1 + (i e / h) (rho - rho_j))
-        let rho = if self.rational {
-            ends.iter()
-                .fold(f64::NEG_INFINITY, |m, (pn, pn1)| m.max(pn1[3] / pn[3]))
+        let (rho, rho_exact_unit) = if self.rational {
+            let mut best = f64::NEG_INFINITY;
+            let mut unit = true;
+            for &(pn, pn1) in &ends_local {
+                let r = pn1[3] / pn[3];
+                if r > best {
+                    best = r;
+                    unit = pn1[3] == pn[3];
+                } else if r == best && pn1[3] != pn[3] {
+                    unit = false;
+                }
+            }
+            (best, unit && best == 1.0)
         } else {
-            1.0
+            (1.0, true)
         };
-        let (mut err, mut err_w, mut ext) = (0.0_f64, 0.0_f64, Vec::new());
-        for (pn, pn1) in ends {
+        let drho = if !self.rational || (frame.err_w_in == 0.0 && rho_exact_unit) {
+            0.0
+        } else {
+            let w_end_low = ends_local
+                .iter()
+                .fold(f64::INFINITY, |m, &(pn, _)| m.min(pn[3]))
+                - frame.err_w_in;
+            if w_end_low > 0.0 && w_end_low.is_finite() {
+                let rho_round = if rho_exact_unit {
+                    0.0
+                } else {
+                    gamma(1) * rho.abs()
+                };
+                (frame.err_w_in * (1.0 + rho.abs()) / w_end_low + rho_round) * (1.0 + gamma(4))
+            } else {
+                f64::INFINITY
+            }
+        };
+        let amp = (1.0 + c * pf * (rho.abs() + 1.0)) * (1.0 + gamma(4));
+        let (mut err_h, mut err_w, mut ext_local) = (0.0_f64, 0.0_f64, Vec::new());
+        for (pn, pn1) in ends_local {
             let leg = lin(rho, pn, -1.0, pn1);
+            // When `rho == 1.0` and `pn1[3] == pn[3]`, `leg[3] = 1 * pn[3] - 1 * pn[3] == 0`
+            // and `1 * pn[3] + t * 0 == pn[3]` exactly in IEEE-754 without an override branch.
+            let exact_constant_weight = !self.rational
+                || (frame.err_w_in == 0.0 && drho == 0.0 && pn[3] == pn1[3] && rho == 1.0);
             let q: Vec<H> = (1..=p)
                 .map(|i| {
                     #[allow(clippy::cast_precision_loss)]
@@ -1687,24 +1687,22 @@ impl Local {
                     lin(1.0, pn, t, leg)
                 })
                 .collect();
-            // rounding: the leg (a product and a difference), t (two products) and the point
-            // (a product and a sum), gamma_6 of the terms' magnitudes
-            let m = |x: H| x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-            err = err.max(gamma(6) * (m(pn) + c * pf * (rho.abs() * m(pn) + m(pn1))));
-            // the weight coordinate the same way, of the weights alone
-            err_w = err_w
-                .max(gamma(6) * (pn[3].abs() + c * pf * (rho.abs() * pn[3].abs() + pn1[3].abs())));
-            ext.push(q);
+            let mh = |x: H| x[0].abs().max(x[1].abs()).max(x[2].abs());
+            let row_err_h = amp * err_h_in
+                + c * pf * drho * mh(pn)
+                + gamma(6) * (mh(pn) + c * pf * (rho.abs() * mh(pn) + mh(pn1)));
+            err_h = err_h.max(row_err_h);
+            if self.rational && !exact_constant_weight {
+                let mw = |x: H| x[3].abs();
+                let row_err_w = amp * frame.err_w_in
+                    + c * pf * drho * mw(pn)
+                    + gamma(6) * (mw(pn) + c * pf * (rho.abs() * mw(pn) + mw(pn1)));
+                err_w = err_w.max(row_err_w);
+            }
+            ext_local.push(q);
         }
         let knots = vec![b + e; p + 1];
-        let mut out = self.joined(ext, &knots)?;
-        out.err = self.err.max(err);
-        out.err_w = if self.rational {
-            self.err_w.max(err_w)
-        } else {
-            0.0
-        };
-        Ok(out)
+        frame.finish(self, ext_local, &knots, err_h, err_w)
     }
 
     /// Ruled past the reach of rows whose end weight ratios differ (#2878): the ruled surface
@@ -1713,6 +1711,10 @@ impl Local {
     /// The curves across are cut into Bezier pieces and multiplied piece by piece, so the
     /// result is of degree `2 q` across. The weights past the joint are the joint's, bit for
     /// bit. The caller has checked [`Self::has_product_form`].
+    ///
+    /// Known limit: unlike [`Self::ruled`], this degree-`2 q` rewrite multiplies every column
+    /// across Bezier pieces in global homogeneous coordinates, so past the rows' reach its
+    /// rounding still grows with the global net size (`O(gamma d^2)` far from the origin).
     ///
     /// Its bound: with `a` of [`Self::product_rounding`] and `m = s w` (`s` the largest
     /// homogeneous coordinate, `w` the largest weight of the last two columns), the joint's
@@ -1897,30 +1899,6 @@ impl Local {
     }
 }
 
-/// Rows of different origins mix at a point: the q + 1 rows of a span across, so the largest l1
-/// distance between two origins within q + 1 consecutive rows.
-fn origin_diameter(origins: &[[f64; 3]], q: usize) -> f64 {
-    let mut diam = 0.0_f64;
-    for (i, oi) in origins.iter().enumerate() {
-        for oj in origins.iter().skip(i + 1).take(q) {
-            let dist = (oi[0] - oj[0]).abs() + (oi[1] - oj[1]).abs() + (oi[2] - oj[2]).abs();
-            diam = diam.max(dist);
-        }
-    }
-    diam
-}
-
-/// The 3D bound of a construction made in a local frame: `S = sum N (H' + w O_j) / sum N w`, an
-/// error of at most `err` in each local point coordinate and `err_w` in each weight moves it at
-/// most `sqrt 3 err + |S - O_j| err_w`, with `|S - O_j| <= reach` (the local points' largest l1
-/// size over their weight, and the origins' diameter) for every row `j` at the point; the way
-/// back's rounding `gamma_2 back` in each coordinate moves it at most `sqrt 3` of that; all over
-/// the least weight `wmin`.
-fn frame_bound(err: f64, err_w: f64, reach: f64, back: f64, wmin: f64) -> f64 {
-    ((2.0 * err + reach * err_w) * (1.0 + gamma(4)) + 2.0 * gamma(2) * back) / wmin
-        * (1.0 + gamma(8))
-}
-
 /// The map of the mirror at a row's end `pn` with the point `pn1` before it: the linear map of
 /// `R^4` fixing the hyperplane `n . x = 0` (`n = (w_n nu, -H_n . nu)`, `nu = w_(n-1) H_n -
 /// w_n H_(n-1)`, the last leg scaled by `w_n w_(n-1)`, so the hyperplane holds `pn` and lifts
@@ -2078,26 +2056,196 @@ fn product_knots(knots: &[f64], joints: &[(f64, usize)], q: usize) -> Result<Vec
     Ok(out)
 }
 
-/// Whether `out` holds `net`'s points and knots over its box, bit for bit, on side `side`'s
-/// direction, and `net`'s other knots.
-fn keeps(net: &Net, out: &Net, side: BoxSide) -> Result<bool> {
-    let (ka, kb, oa, ob) = if side.is_u() {
-        (net.u_knots(), out.u_knots(), net.v_knots(), out.v_knots())
-    } else {
-        (net.v_knots(), out.v_knots(), net.u_knots(), out.u_knots())
-    };
-    if oa != ob {
-        return Ok(false);
+/// Each row of a [`Local`] net translated to its own end point `O_j = H_n / w_n`, shared by
+/// [`Local::natural`], [`Local::ruled`] and [`Local::mirrored_by`] so linear homogeneous
+/// continuations and reflections along the rows round at the span's own scale rather than at the
+/// part's distance from the origin (`docs/definitions-and-certificates.md` §7, point 5).
+///
+/// - **Forward (`of` -> `local`, `tail_err_h`, `err_w_in`).** Choosing `O_j = fl(H_n / w_n)`
+///   fixes an origin per row (exact by choice: any linear homogeneous combination along row `j`
+///   commutes with `H -> H - w O_j`). Every point of every row is translated into `local`
+///   (whole rows, never partial), and on the `tail` trailing points a construction reads
+///   (`None` = the whole row, stored on `local.err` for `with_knot`), each spatial coordinate
+///   `x'[c] = fl(x[c] - fl(w O_j[c]))` carries the input's spatial and weight errors
+///   `|dH[c] - dw O_j[c]| <= err + err_w max |O_j|` plus that point's own translation rounding:
+///   `gamma_1 |x'[c]|` when `w == 1` (`1 * O_j[c]` is exact in IEEE-754) and
+///   `gamma_2 (|x[c]| + |w O_j[c]|)` otherwise. Weights are untouched
+///   (`err_w_in = err_w` when rational, else `0`).
+/// - **Back (`finish` -> `frame`).** Only the joint column `H_n` and `ext_local` have nonzero
+///   B-spline basis support on `[b, b + e]` (the joint knot `b` has multiplicity `p`).
+///   Translating each new point back `H[c] = fl(H'[c] + fl(w O_j[c]))` adds
+///   `|d_back[c]| <= gamma_2 back` (`back = max (|H'[c]| + |w O_j[c]|)`). At any `(u, v)` in
+///   `[b, b + e]`, at most `q + 1` consecutive rows have nonzero basis weight `M_j(v)`; with
+///   `diam` the largest `l_1` distance between two origins within `q + 1` rows and `pmax` the
+///   largest local `l_1` radius `(|H'_x| + |H'_y| + |H'_z|) / |w|` over the active columns
+///   (joint + `ext_local`), every active origin satisfies
+///   `||O_j - S~||_2 <= pmax + diam + 2 gamma_2 back / w_min`. From the quotient identity
+///   `W^* (S~ - S) = sum B_ij (dH'_ij + d_back_ij + dw_ij (O_j - S~))` with
+///   `W^* >= w_min - err_w` (`INFINITY` if `w_min <= err_w`), the 3D distance on `[b, b + e]`
+///   is bounded by
+///   `((2 err_h + (pmax + diam) err_w) (1 + gamma_4) + 2 gamma_2 back (1 + err_w / w_min))
+///   / (w_min - err_w)`.
+struct LocalFrame {
+    origins: Vec<[f64; 3]>,
+    local: Local,
+    o_max: f64,
+    err_w_in: f64,
+}
+
+impl LocalFrame {
+    fn of(src: &Local) -> Result<Self> {
+        let mut o_max = 0.0_f64;
+        let origins: Vec<[f64; 3]> = src
+            .rows
+            .iter()
+            .map(|r| {
+                let x = r.last().ok_or_else(op_err)?;
+                let w = if src.rational { x[3] } else { 1.0 };
+                if !(w.is_finite() && w > 0.0) {
+                    return Err(SolidError::invalid_input(
+                        OP,
+                        "a weight that is not positive",
+                    ));
+                }
+                let o = [x[0] / w, x[1] / w, x[2] / w];
+                if src.rational {
+                    o_max = o_max.max(o[0].abs()).max(o[1].abs()).max(o[2].abs());
+                }
+                Ok(o)
+            })
+            .collect::<Result<_>>()?;
+        let mut local = src.clone();
+        for (r, o) in local.rows.iter_mut().zip(&origins) {
+            for x in r.iter_mut() {
+                let w = if src.rational { x[3] } else { 1.0 };
+                for (v, &oc) in x.iter_mut().zip(o) {
+                    if w == 1.0 {
+                        *v -= oc;
+                    } else {
+                        *v -= w * oc;
+                    }
+                }
+            }
+        }
+        let err_w_in = if src.rational { src.err_w } else { 0.0 };
+        local.err_w = err_w_in;
+        let mut frame = Self {
+            origins,
+            local,
+            o_max,
+            err_w_in,
+        };
+        frame.local.err = frame.tail_err_h(src, None);
+        Ok(frame)
     }
+
+    /// Forward spatial homogeneous error bound over the `tail` trailing points of each row
+    /// (`None` = whole row).
+    fn tail_err_h(&self, src: &Local, tail: Option<usize>) -> f64 {
+        let mut trans_round = 0.0_f64;
+        for ((src_r, loc_r), o) in src.rows.iter().zip(&self.local.rows).zip(&self.origins) {
+            let take = tail.unwrap_or(src_r.len());
+            for (sx, lx) in src_r.iter().rev().zip(loc_r.iter().rev()).take(take) {
+                let w = if src.rational { sx[3] } else { 1.0 };
+                for ((&sv, &lv), &oc) in sx.iter().zip(lx).zip(o) {
+                    if w == 1.0 {
+                        trans_round = trans_round.max(gamma(1) * lv.abs());
+                    } else {
+                        let prod = w * oc;
+                        trans_round = trans_round.max(gamma(2) * (sv.abs() + prod.abs()));
+                    }
+                }
+            }
+        }
+        (src.err + src.err_w * self.o_max + trans_round) * (1.0 + gamma(4))
+    }
+
+    fn finish(
+        self,
+        src: &Local,
+        ext_local: Vec<Vec<H>>,
+        knots: &[f64],
+        err_h: f64,
+        err_w: f64,
+    ) -> Result<Local> {
+        let (mut wmin, mut pmax, mut back) = (f64::INFINITY, 0.0_f64, 0.0_f64);
+        for x in self
+            .local
+            .rows
+            .iter()
+            .filter_map(|r| r.last())
+            .chain(ext_local.iter().flatten())
+        {
+            let w = if src.rational { x[3] } else { 1.0 };
+            wmin = wmin.min(w);
+            pmax = pmax.max((x[0].abs() + x[1].abs() + x[2].abs()) / w.abs());
+        }
+        let ext: Vec<Vec<H>> = ext_local
+            .into_iter()
+            .zip(&self.origins)
+            .map(|(r, o)| {
+                r.into_iter()
+                    .map(|mut x| {
+                        let w = if src.rational { x[3] } else { 1.0 };
+                        for (v, &oc) in x.iter_mut().zip(o) {
+                            let prod = w * oc;
+                            back = back.max(v.abs() + prod.abs());
+                            *v += prod;
+                        }
+                        x
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut diam = 0.0_f64;
+        for (i, oi) in self.origins.iter().enumerate() {
+            for oj in self.origins.iter().skip(i + 1).take(src.q) {
+                let dist = (oi[0] - oj[0]).abs() + (oi[1] - oj[1]).abs() + (oi[2] - oj[2]).abs();
+                diam = diam.max(dist);
+            }
+        }
+        let mut out = src.joined(ext, knots)?;
+        out.err = (err_h + err_w * self.o_max + gamma(2) * back) * (1.0 + gamma(4));
+        out.err_w = err_w;
+        let w_low = wmin - err_w;
+        let frame_bound = if w_low > 0.0 && w_low.is_finite() && wmin.is_finite() {
+            let num = (2.0 * err_h + (pmax + diam) * err_w) * (1.0 + gamma(4))
+                + 2.0 * gamma(2) * back * (1.0 + err_w / wmin);
+            (num / w_low) * (1.0 + gamma(8))
+        } else {
+            f64::INFINITY
+        };
+        out.frame = Some(frame_bound);
+        Ok(out)
+    }
+}
+
+/// Whether `out` holds `net`'s knots over its box, bit for bit, on side `side`'s direction.
+fn keeps_along_knots(net: &Net, out: &Net, side: BoxSide) -> Result<bool> {
+    let (ka, kb) = if side.is_u() {
+        (net.u_knots(), out.u_knots())
+    } else {
+        (net.v_knots(), out.v_knots())
+    };
     // the source's knots but its end's last copy, at the kept end of the result's
     let keep = ka.len().checked_sub(1).ok_or_else(op_err)?;
     let shift = kb.len().checked_sub(ka.len()).ok_or_else(op_err)?;
-    let knots_kept = if side.is_high() {
+    Ok(if side.is_high() {
         ka.iter().take(keep).eq(kb.iter().take(keep))
     } else {
         ka.iter().skip(1).eq(kb.iter().skip(shift + 1))
+    })
+}
+
+/// Whether `out` holds `net`'s points and knots over its box, bit for bit, on side `side`'s
+/// direction, and `net`'s other knots.
+fn keeps(net: &Net, out: &Net, side: BoxSide) -> Result<bool> {
+    let (oa, ob) = if side.is_u() {
+        (net.v_knots(), out.v_knots())
+    } else {
+        (net.u_knots(), out.u_knots())
     };
-    if !knots_kept {
+    if oa != ob || !keeps_along_knots(net, out, side)? {
         return Ok(false);
     }
     let (a, b) = (net.cpts(), out.cpts());
